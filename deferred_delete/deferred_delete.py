@@ -56,7 +56,7 @@ def mark_cleaned(cxn, id):
 
 def delete_volumes(cleaner_name, ioctx, cxn, id):
     # try to claim ownership
-    query = "update volumes set cleaner='{worker}' where id='{id}'"
+    query = "update volumes set cleaner=IF(cleaner IS NULL,'{worker}', cleaner) where id='{id}'"
     active_query = query.format(worker=cleaner_name, id=id)
     log.debug("%s", active_query)
     cursor = cxn.cursor()
@@ -115,14 +115,15 @@ db_host = '10.140.12.203'
 cnx = mysql.connector.connect(host= db_host, user='root',password='test123', database='cinder')
 cursor = cnx.cursor(buffered=True)
 
-query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1")
 
 worker = 0
 hostname = os.uname()[1]
 cleaner_name = hostname + '-' + str(worker)
 log.info("%s: Starting cleaner: %s", str(datetime.now()), cleaner_name)
 
-cursor.execute(query)
+query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1 AND (cleaner IS NULL OR cleaner='{cleaner}')")
+active_query = query.format(cleaner=cleaner_name)
+cursor.execute(active_query)
 vols = cursor.fetchall()
 #pdb.set_trace()
 for id in vols:
