@@ -7,6 +7,8 @@ import pdb
 from oslo_utils import encodeutils
 import logging as log
 import os
+from multiprocessing import Pool
+import time
 
 log.basicConfig(filename='deferred_delete.log',level=log.DEBUG)
 
@@ -106,31 +108,59 @@ def connect_to_rados(userid, pool):
         log.error("Failed to connect to cluster")
         raise e
 
+def worker_start(cleaner, ioctx, cnx, cursor):
+
+	log.info("%s: Starting cleaner: %s", str(datetime.now()), cleaner)
+	#query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1")
+	query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1 AND (cleaner IS NULL OR cleaner='{cleaner}')")
+	active_query = query.format(cleaner=cleaner)
+	cursor.execute(active_query)
+	vols = cursor.fetchall()
+
+	for id in vols:
+	    log.info('Deleting %s', id[0])
+	    delete_volumes(cleaner, ioctx, cnx, id[0])
+	cursor.close()
+	log.info("%s: cleaner:%s going to sleep", str(datetime.now()), cleaner)
+
+def workerd(cleaner):
+        global SLEEPTIME
+        global userid
+        global pool
+
+        while True:
+		client, ioctx = connect_to_rados(userid, pool)
+		cnx = mysql.connector.connect(host= db_host, user='root',password='test123', database='cinder')
+		cursor = cnx.cursor(buffered=True)
+		worker_start(cleaner, ioctx, cnx,cursor)
+		cnx.close()
+		ioctx.close()
+		client.shutdown()
+		time.sleep(SLEEPTIME)
+
+
+##globals##
 userid = encodeutils.safe_encode("cinder")
 pool = encodeutils.safe_encode("sbs")
-
-client, ioctx = connect_to_rados(userid, pool)
-
 db_host = '10.140.12.203'
-cnx = mysql.connector.connect(host= db_host, user='root',password='test123', database='cinder')
-cursor = cnx.cursor(buffered=True)
+WORKERS = 5
+SLEEPTIME = 10
 
 
-worker = 0
 hostname = os.uname()[1]
-cleaner_name = hostname + '-' + str(worker)
-log.info("%s: Starting cleaner: %s", str(datetime.now()), cleaner_name)
 
-query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1 AND (cleaner IS NULL OR cleaner='{cleaner}')")
-active_query = query.format(cleaner=cleaner_name)
-cursor.execute(active_query)
-vols = cursor.fetchall()
-#pdb.set_trace()
-for id in vols:
-    log.info('Deleting %s', id[0])
-    delete_volumes(cleaner_name, ioctx, cnx, id[0])
-cursor.close()
-cnx.close()
 
-ioctx.close()
-client.shutdown()
+#cnx = mysql.connector.connect(host= db_host, user='root',password='test123', database='cinder')
+#cursor = cnx.cursor(buffered=True)
+
+
+cleaners = []
+for i in xrange(WORKERS):
+        cleaner_name = hostname + '-' + str(i)
+        cleaners.append(cleaner_name)
+
+
+p = Pool(WORKERS)
+p.map(workerd, cleaners)
+
+#cnx.close()
