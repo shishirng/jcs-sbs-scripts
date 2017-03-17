@@ -10,8 +10,6 @@ import os
 from multiprocessing import Pool
 import time
 
-log.basicConfig(filename='deferred_delete.log',level=log.DEBUG)
-
 def check_pending_backups(cxn, volume_id):
     cursor = cxn.cursor()
     query = "SELECT id from backups WHERE volume_id='{id}' AND status='creating'"
@@ -128,6 +126,8 @@ def workerd(cleaner):
         global userid
         global pool
 
+	log_filename = "/var/log/cinder/" + "deferred_delete" + cleaner + ".log"
+	log.basicConfig(filename=log_filename,level=log.DEBUG)
         while True:
 		client, ioctx = connect_to_rados(userid, pool)
 		cnx = mysql.connector.connect(host= db_host, user='root',password='test123', database='cinder')
