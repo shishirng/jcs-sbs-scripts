@@ -53,26 +53,7 @@ def mark_cleaned(cxn, id):
 	cxn.commit()
 	log.debug("%s",active_query)
 
-
-def delete_volumes(cleaner_name, ioctx, cxn, id):
-    # try to claim ownership
-    query = "update volumes set cleaner=IF(cleaner IS NULL,'{worker}', cleaner) where id='{id}'"
-    active_query = query.format(worker=cleaner_name, id=id)
-    log.debug("%s", active_query)
-    cursor = cxn.cursor()
-    cursor.execute(active_query)
-    cxn.commit()
-
-    query1 = "select cleaner from volumes where id='{id}'"
-    active_query1 = query1.format(id=id)
-    log.debug("%s", active_query1)
-    cursor.execute(active_query1)
-    for cleaner in cursor:
-	log.debug("volume %s owned by cleaner:%s", id, cleaner[0])
-        if cleaner[0] != cleaner_name:
-            log.info("Not cleaningvolume %s as it is owned by %s", (id, cleaner))
-            return
-
+def rbd_delete(id, ioctx, cxn):
     log.info("Deleting volume %s", id)
     volume_name = encodeutils.safe_encode("volume-%s" % id)
     rbd_inst = rbd.RBD()
@@ -95,6 +76,36 @@ def delete_volumes(cleaner_name, ioctx, cxn, id):
         log.error("Failed to delete volume %s",id)
         raise e
 
+def delete_volumes(cleaner_name, ioctx, cxn, id):
+    # try to claim ownership
+    query = "update volumes set cleaner=IF(cleaner IS NULL,'{worker}', cleaner) where id='{id}'"
+    active_query = query.format(worker=cleaner_name, id=id)
+    log.debug("%s", active_query)
+    cursor = cxn.cursor()
+    cursor.execute(active_query)
+    updated = cursor.rowcount
+    log.debug("updated %d rows", updated)
+    if updated <= 0:
+        log.info("Not cleaning volume %s as it is not owned by %s", (id, cleaner))
+	return
+    cxn.commit()
+    rbd_delete(id, ioctx, cxn)
+
+def delete_stale_volumes(cleaner_name, ioctx, cxn, id):
+    # try to claim ownership
+    query = "update volumes set cleaner='{worker}',updated_at=NOW() where id='{id}' AND updated_at < DATE_SUB(NOW(), INTERVAL 1 hour)"
+    active_query = query.format(worker=cleaner_name, id=id)
+    log.debug("%s", active_query)
+    cursor = cxn.cursor()
+    cursor.execute(active_query)
+    updated = cursor.rowcount
+    log.debug("updated %d rows", updated)
+    if updated <= 0:
+        log.info("Not cleaning volume %s as it is not owned by %s", (id, cleaner))
+	return
+    cxn.commit()
+    rbd_delete(id, ioctx, cxn)
+
 def connect_to_rados(userid, pool):
     client = rados.Rados(rados_id=userid, conffile="/etc/ceph/ceph.conf")
     try:
@@ -110,23 +121,33 @@ def worker_start(cleaner, ioctx, cnx, cursor):
 
 	log.info("%s: Starting cleaner: %s", str(datetime.now()), cleaner)
 	#query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1")
-	query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1 AND (cleaner IS NULL OR cleaner='{cleaner}')")
-	active_query = query.format(cleaner=cleaner)
-	cursor.execute(active_query)
+	query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1 AND cleaner IS NULL")
+	cursor.execute(query)
 	vols = cursor.fetchall()
 
 	for id in vols:
 	    log.info('Deleting %s', id[0])
 	    delete_volumes(cleaner, ioctx, cnx, id[0])
-	cursor.close()
+	#cursor.close()
 	log.info("%s: cleaner:%s going to sleep", str(datetime.now()), cleaner)
 
+	#delete volumes which might have failed
+	query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1 AND (deleted_at < DATE_SUB(NOW(), INTERVAL 1 HOUR))")
+	cursor.execute(query)
+	vols_stale = cursor.fetchall()
+
+	for id in vols_stale:
+            log.info('Deleting %s', id[0])
+	    delete_stale_volumes(cleaner, ioctx, cnx, id[0])
+
+	cursor.close()
+	
 def workerd(cleaner):
         global SLEEPTIME
         global userid
         global pool
 
-	log_filename = "/var/log/cinder/" + "deferred_delete" + cleaner + ".log"
+	log_filename = "/var/log/cinder/" + "deferred_delete-" + cleaner + ".log"
 	log.basicConfig(filename=log_filename,level=log.DEBUG)
         while True:
 		client, ioctx = connect_to_rados(userid, pool)
