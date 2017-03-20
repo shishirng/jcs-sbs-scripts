@@ -9,6 +9,7 @@ import logging as log
 import os
 from multiprocessing import Pool
 import time
+import ConfigParser
 
 def check_pending_backups(cxn, volume_id):
     cursor = cxn.cursor()
@@ -146,12 +147,16 @@ def workerd(cleaner):
         global SLEEPTIME
         global userid
         global pool
+	global db_host
+	global db_user
+	global db_pswd
+	global db_database
 
 	log_filename = "/var/log/cinder/" + "deferred_delete-" + cleaner + ".log"
 	log.basicConfig(filename=log_filename,level=log.DEBUG)
         while True:
 		client, ioctx = connect_to_rados(userid, pool)
-		cnx = mysql.connector.connect(host= db_host, user='root',password='test123', database='cinder')
+		cnx = mysql.connector.connect(host= db_host, user = db_user ,password = db_pswd, database = db_database)
 		cursor = cnx.cursor(buffered=True)
 		worker_start(cleaner, ioctx, cnx,cursor)
 		cnx.close()
@@ -163,23 +168,22 @@ def workerd(cleaner):
 ##globals##
 userid = encodeutils.safe_encode("cinder")
 pool = encodeutils.safe_encode("sbs")
-db_host = '10.140.12.203'
-WORKERS = 5
-SLEEPTIME = 10
+config = ConfigParser.ConfigParser()
+config.read("/etc/cinder/deferred_delete.conf")
 
+db_host = config.get('client', 'db_host')
+WORKERS = int(config.get('client', 'workers'))
+SLEEPTIME = int(config.get('client', 'interval'))
+db_user = config.get('client', 'db_user')
+db_pswd = config.get('client', 'db_password')
+db_database = config.get('client', 'database')
 
 hostname = os.uname()[1]
-
-
-#cnx = mysql.connector.connect(host= db_host, user='root',password='test123', database='cinder')
-#cursor = cnx.cursor(buffered=True)
-
 
 cleaners = []
 for i in xrange(WORKERS):
         cleaner_name = hostname + '-' + str(i)
         cleaners.append(cleaner_name)
-
 
 p = Pool(WORKERS)
 p.map(workerd, cleaners)
