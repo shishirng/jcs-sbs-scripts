@@ -79,7 +79,7 @@ def rbd_delete(id, ioctx, cxn):
 
 def delete_volumes(cleaner_name, ioctx, cxn, id):
     # try to claim ownership
-    query = "update volumes set cleaner=IF(cleaner IS NULL,'{worker}', cleaner) where id='{id}'"
+    query = "update volumes set cleaner=IF(cleaner IS NULL,'{worker}', cleaner),updated_at=NOW() where id='{id}'"
     active_query = query.format(worker=cleaner_name, id=id)
     log.debug("%s", active_query)
     cursor = cxn.cursor()
@@ -93,9 +93,10 @@ def delete_volumes(cleaner_name, ioctx, cxn, id):
     rbd_delete(id, ioctx, cxn)
 
 def delete_stale_volumes(cleaner_name, ioctx, cxn, id):
+    global retry_interval
     # try to claim ownership
-    query = "update volumes set cleaner='{worker}',updated_at=NOW() where id='{id}' AND updated_at < DATE_SUB(NOW(), INTERVAL 1 hour)"
-    active_query = query.format(worker=cleaner_name, id=id)
+    query = "update volumes set cleaner='{worker}',updated_at=NOW() where id='{id}' AND updated_at < DATE_SUB(NOW(), INTERVAL {interval} hour)"
+    active_query = query.format(worker=cleaner_name, id=id, interval=retry_interval)
     log.debug("%s", active_query)
     cursor = cxn.cursor()
     cursor.execute(active_query)
@@ -119,11 +120,14 @@ def connect_to_rados(userid, pool):
         raise e
 
 def worker_start(cleaner, ioctx, cnx, cursor):
+	global retry_interval
+	global vol_type
 
 	log.info("%s: Starting cleaner: %s", str(datetime.now()), cleaner)
 	#query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1")
-	query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1 AND cleaner IS NULL")
-	cursor.execute(query)
+	query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1 AND cleaner IS NULL AND volume_type_id={vol_type}")
+	active_query = query.format(vol_type=vol_type)
+	cursor.execute(active_query)
 	vols = cursor.fetchall()
 
 	for id in vols:
@@ -133,7 +137,8 @@ def worker_start(cleaner, ioctx, cnx, cursor):
 	log.info("%s: cleaner:%s going to sleep", str(datetime.now()), cleaner)
 
 	#delete volumes which might have failed
-	query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1 AND (deleted_at < DATE_SUB(NOW(), INTERVAL 1 HOUR))")
+	query = ("SELECT id FROM volumes WHERE cleaned=False AND deleted=1 AND (updated_at < DATE_SUB(NOW(), INTERVAL {interval} HOUR)) AND volume_type_id={vol_type}")
+	active_query = query.format(interval = retry_interval, vol_type=vol_type)
 	cursor.execute(query)
 	vols_stale = cursor.fetchall()
 
@@ -168,6 +173,7 @@ def workerd(cleaner):
 ##globals##
 userid = encodeutils.safe_encode("cinder")
 pool = encodeutils.safe_encode("sbs")
+vol_type = 1
 config = ConfigParser.ConfigParser()
 config.read("/etc/cinder/deferred_delete.conf")
 
@@ -177,6 +183,12 @@ SLEEPTIME = int(config.get('client', 'interval'))
 db_user = config.get('client', 'db_user')
 db_pswd = config.get('client', 'db_password')
 db_database = config.get('client', 'database')
+vol_type = config.get('client', 'volume_type')
+retry_interval = config.get('client', 'retry_interval')
+
+if vol_type != 'ms1':
+	pool = encodeutils.safe_encode("ssds")
+	vol_type = 2
 
 hostname = os.uname()[1]
 
